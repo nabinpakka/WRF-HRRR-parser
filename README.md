@@ -1,11 +1,10 @@
 # Grib Parser and Decoder
 
 ## Overview
-This project is designed to parse and decode grib files from byte data. 
-The messages are first parsed via the byte data to extract the important values, then decoded.
-Parsing the byte data currently takes the most time and to be improved.
+This project is designed to parse and decode WRF-HRRR weather grib2 files from byte data. 
+The messages are first parsed via the byte data to extract the important values, then decoded based on the documentation provided NOAA.
+Parsing the byte data currently takes the most time and to be improved. Current version uses cython to decode the data, reducing the the taken by pygrib significantly.
 
-An implementation in C++ will come soon.
 
 ## Prerequisites
 - [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html) should be installed on your system.
