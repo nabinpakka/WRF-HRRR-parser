@@ -413,32 +413,32 @@ def main():
 
     start_time = time.time()
 
-    for date, paths in file_paths_based_on_date.items():
-        print(f"Date: {date}, Number of files: {len(paths)}")
-        process_single_day(paths, date, lat, lon, indices)
-    # with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    # for date, paths in file_paths_based_on_date.items():
+    #     print(f"Date: {date}, Number of files: {len(paths)}")
+    #     process_single_day(paths, date, lat, lon, indices)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=24) as executor:
 
-    #     futures = [
-    #         executor.submit(process_single_day, paths, date, lat, lon, indices)
-    #         for date, paths in file_paths_based_on_date.items()
-    #     ]
+        futures = [
+            executor.submit(process_single_day, paths, date, lat, lon, indices)
+            for date, paths in file_paths_based_on_date.items()
+        ]
 
-    #     # processing results as they complete
-    #     completed = 0
-    #     total = len(futures)
+        # processing results as they complete
+        completed = 0
+        total = len(futures)
 
-    #     for future in concurrent.futures.as_completed(futures):
-    #         date = futures[future]
-    #         completed += 1
+        for future in concurrent.futures.as_completed(futures):
+            date = futures[future]
+            completed += 1
             
-    #         try:
-    #             result = future.result()  # This is critical - must call result()
-    #             print(f"[{completed}/{total}] Completed: {date} - {result.get('status', 'unknown')}")
-    #         except Exception as e:
-    #             print(f"[{completed}/{total}] Failed: {date} - Error: {e}")
+            try:
+                result = future.result()  # This is critical - must call result()
+                print(f"[{completed}/{total}] Completed: {date} - {result.get('status', 'unknown')}")
+            except Exception as e:
+                print(f"[{completed}/{total}] Failed: {date} - Error: {e}")
             
-    #         # Explicitly delete the future reference
-    #         del future
+            # Explicitly delete the future reference
+            del future
 
     processing_time = time.time() - start_time
     print(f"Processing time for processing: {processing_time:.2f} seconds")
