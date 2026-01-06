@@ -192,7 +192,7 @@ def get_lat_lon_for_indices(lat: np.ndarray, lon: np.ndarray, indices: List[int]
     return filtered_lat, filtered_lon
 
 
-def process_message(message, lat: np.ndarray, lon: np.ndarray, indices: List[int]) -> dict:
+def process_message(message, indices: List[int]) -> dict:
     """Function to process a single message."""
     try:
         # create a BitReader object
@@ -201,9 +201,7 @@ def process_message(message, lat: np.ndarray, lon: np.ndarray, indices: List[int
 
         # get the first values of original scaled data
         try:
-            start_time = time.time()
             first_values = extract_initial_values(message, bit_reader)
-            initial_val_time = time.time() - start_time
         except Exception as e:
             # put all values as 0
             unscaled_values = np.zeros(message['total_data_points'])
@@ -225,7 +223,6 @@ def process_message(message, lat: np.ndarray, lon: np.ndarray, indices: List[int
             group_last_length=message['true_length_of_last_group']
         )
         bit_groups = bit_group_reader.read_groups(bit_reader)
-        bit_group_extraction_time = time.time() - start_time
 
         # check the lengths
         if not bit_group_reader.check_lengths(bit_groups, message['total_data_points'], len(message['raw_data'])):
@@ -233,36 +230,33 @@ def process_message(message, lat: np.ndarray, lon: np.ndarray, indices: List[int
             return None
 
         # extract the data
-        start_time = time.time()
+
         packed_values = extract_packed_values(bit_reader, bit_groups)
-        packed_value_extraction_time = time.time() - start_time
+        del bit_groups
+        del bit_reader
 
         # undo spatial differencing
-        start_time = time.time()
+
         original_scaled_values = utils.undo_second_order_differencing(packed_values, first_values)
-        spatial_differencing_time = time.time() - start_time
+        filtered_original_scaled_values = original_scaled_values[indices]
+        del original_scaled_values
+        del packed_values
 
         # unscale the values
-        start_time = time.time()
-        unscaled_values = utils.unscale_values(original_scaled_values, message['binary_scale_factor'], message['decimal_scale_factor'], message['reference_value'])
-        filtered_values = unscaled_values[indices]
-
-
-        # get values for corresponding coordinates
-        unscale_time = time.time() - start_time
+        unscaled_values = utils.unscale_values(filtered_original_scaled_values, message['binary_scale_factor'], message['decimal_scale_factor'], message['reference_value'])
 
         # Return results and timing information
         return {
             'name': message['parameter_name'],
             'message_number': message['message_number'],
-            'unscaled_values': filtered_values
+            'unscaled_values': unscaled_values
         }
 
     except Exception as e:
         print(f"Error processing message {message['message_number']}: {e}")
         return None
 
-def process_results(daily_results: List[dict]) -> dict:
+def process_daily_results(daily_results: List[dict]) -> dict:
     intermediate = {}
     processed_data = {}
     for result in daily_results:
@@ -292,8 +286,12 @@ def process_results(daily_results: List[dict]) -> dict:
 
 def save_results(date: str, results: dict, lat:np.ndarray, lon: np.ndarray):
 
+    year = date[:4]
+    output_dir = f"../output/{year}"
+
+    os.makedirs(output_dir, exist_ok=True)
     # Save results to a file
-    filename = f"../cache/results_{date}.csv"
+    filename = f"{output_dir}/{date}.csv"
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
         cols = results.keys()
@@ -305,97 +303,146 @@ def save_results(date: str, results: dict, lat:np.ndarray, lon: np.ndarray):
                 values.append(results[col][i])
             writer.writerow([l, lon[i], *values])
 
+def process_lat_lon(path: str):
+    if not os.path.exists("../cache/lat_grid.npy") or not os.path.exists("../cache/lon_grid.npy"):
+        lat, lon = load_lat_lon_grid(path)
+        np.save("../cache/lat_grid.npy", lat)
+        np.save("../cache/lon_grid.npy", lon)
+    else:
+        lat = np.load("../cache/lat_grid.npy")
+        lon = np.load("../cache/lon_grid.npy")
+
+    bboxs = [(37.772, 41.761, 272.472, 275.216)]
+    indices = extract_indices_for_bbox(lat, lon, bboxs)
+
+    # record length of indices for each bbox
+    indices_lengths = [len(idx) for idx in indices]
+    print(indices_lengths)
+
+    indices = [idx for sublist in indices for idx in sublist]
+
+    filtered_lat, filtered_lon = get_lat_lon_for_indices(lat, lon, indices)
+    return filtered_lat, filtered_lon, indices
+
+
+def process_single_day(paths: List[str], date: str, lat: np.ndarray, lon: np.ndarray, indices: List[int]) -> dict:
+
+    print("Processing date:", date)
+    results = []
+    try:
+        start_time = time.time()
+        for path in paths:
+            # parse the GRIB file
+            print("Parsing file:", path)
+            messages = parse_grib_file(path, lat, lon)
+            print("Parsed file:", path)
+            for mesage in messages:
+                result = process_message(mesage, indices)
+                results.append(result)
+            print("Processed file:", path)
+
+            del messages
+        parsing_time = time.time() - start_time
+        print(f"Parsing time for date {date}: {parsing_time:.2f} seconds")
+
+        # processing results
+        processed_results = process_daily_results(results)
+        del results
+
+        print("Processed results for date:", date)
+        save_results(date, processed_results, lat, lon)
+
+        del processed_results
+
+    except Exception as e:
+        print(f"Error processing date {date}: {e}")
+        # Clean up partial results
+        if 'results' in locals():
+            del results
+        if 'processed_results' in locals():
+            del processed_results
+        return {"date": date, "status": "failed", "error": str(e)}
+
+
+def load_file_paths(root_data_dir: str) -> dict:
+    filepath_dict_path = "../cache/filepaths_based_on_date.json"
+    
+    if not os.path.exists(filepath_dict_path):
+        file_paths_based_on_date = {}
+        
+        for year_dir in os.listdir(root_data_dir):
+            year_path = os.path.join(root_data_dir, year_dir)
+            if not os.path.isdir(year_path):
+                continue
+                
+            for date_dir in os.listdir(year_path):
+                day_path = os.path.join(year_path, date_dir)
+                if not os.path.isdir(day_path):
+                    continue
+                
+                file_paths = [
+                    os.path.join(day_path, f)
+                    for f in os.listdir(day_path)
+                    if f.endswith(".grib2")
+                ]
+                
+                if file_paths:
+                    file_paths_based_on_date[date_dir] = file_paths
+        
+        with open(filepath_dict_path, 'w') as f:
+            json.dump(file_paths_based_on_date, f, indent=4)
+    else:
+        with open(filepath_dict_path, 'r') as f:
+            file_paths_based_on_date = json.load(f)
+    return file_paths_based_on_date
+
 def main():
 
     print("\n\n")
 
-    root_data_dir = "../grib_data"
+    root_data_dir = "/mnt/yieldPrediction/wrf"
 
-    # # unzip the grib_data folder if it does not exist
-    # if not os.path.exists("../grib_data"):
-    #     import zipfile
-    #     with zipfile.ZipFile("../grib_data.zip", 'r') as zip_ref:
-    #         print ("Unzipping the grib_data folder...")
-    #         zip_ref.extractall("../")
-    #     print("Unzipping complete.")
-
-        # create the cache directory if it does not exist
     if not os.path.exists("../cache"):
         print("Creating cache directory...")
         os.makedirs("../cache")
         print("Cache directory created.")
 
-    file_paths_based_on_date = {}
-    filepath_dict_path =  "../cache/filepaths_based_on_date.json"
-    if not os.path.exists(filepath_dict_path):
+    file_paths_based_on_date = load_file_paths(root_data_dir)
 
-        # specify the filename
-        for root, dirs, _ in os.walk(root_data_dir):
-            for dir_name in dirs:
-                date = dir_name
-                file_paths = []
-                for root, dirs, files in os.walk(os.path.join(root_data_dir, dir_name)):
-                    for file_name in files:
-                        if file_name.endswith(".grib2"):
-                            file_path = os.path.join(root, file_name)
-                            file_paths.append(file_path)
-                file_paths_based_on_date[date] = file_paths
-        with open(filepath_dict_path, 'w') as f:
-            json.dump(file_paths_based_on_date, f, indent=4)
-    else:
-        with open(filepath_dict_path, 'r') as f:
-            file_paths_based_on_date =  json.load(f)
-    
-    
+    lat, lon, indices = process_lat_lon(file_paths_based_on_date["20221003"][0])
+
+    start_time = time.time()
+
     for date, paths in file_paths_based_on_date.items():
-        # load lat/lon grids
-        if not os.path.exists("../cache/lat_grid.npy") or not os.path.exists("../cache/lon_grid.npy"):
-            lat, lon = load_lat_lon_grid(paths[0])
-            np.save("../cache/lat_grid.npy", lat)
-            np.save("../cache/lon_grid.npy", lon)
-        else:
-            lat = np.load("../cache/lat_grid.npy")
-            lon = np.load("../cache/lon_grid.npy")
+        print(f"Date: {date}, Number of files: {len(paths)}")
+        process_single_day(paths, date, lat, lon, indices)
+    # with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
 
-        daily_messages = []
+    #     futures = [
+    #         executor.submit(process_single_day, paths, date, lat, lon, indices)
+    #         for date, paths in file_paths_based_on_date.items()
+    #     ]
 
-        print(f"Date: {date}")
-        for path in paths:
-            print(f"  File: {path}")
-    
+    #     # processing results as they complete
+    #     completed = 0
+    #     total = len(futures)
 
-            # parse the GRIB file
-            messages = parse_grib_file(path, lat, lon)
+    #     for future in concurrent.futures.as_completed(futures):
+    #         date = futures[future]
+    #         completed += 1
+            
+    #         try:
+    #             result = future.result()  # This is critical - must call result()
+    #             print(f"[{completed}/{total}] Completed: {date} - {result.get('status', 'unknown')}")
+    #         except Exception as e:
+    #             print(f"[{completed}/{total}] Failed: {date} - Error: {e}")
+            
+    #         # Explicitly delete the future reference
+    #         del future
 
-            # number of messages
-            print(f"Number of messages: {len(messages)}\n")
-            daily_messages.extend(messages)
-
-        # process messages sequentially
-        start_time = time.time()
-
-        bboxs = [(37.772, 41.761, 272.472, 275.216)]
-        indices = extract_indices_for_bbox(lat, lon, bboxs)
-
-        # record length of indices for each bbox
-        indices_lengths = [len(idx) for idx in indices]
-        print(indices_lengths)
-
-        indices = [idx for sublist in indices for idx in sublist]
-        daily_results = []
-        for mesage in tqdm.tqdm(daily_messages):
-            result = process_message(mesage, lat, lon, indices)
-            daily_results.append(result)
-
-        # processing results
-        processed_results = process_results(daily_results)
-        filtered_lat, filtered_lon = get_lat_lon_for_indices(lat, lon, indices)
-        save_results(date, processed_results, filtered_lat, filtered_lon)
-        processing_time = time.time() - start_time
-        print(f"Processing time for {date} processing: {processing_time:.2f} seconds")
-    
-   
-    
+    processing_time = time.time() - start_time
+    print(f"Processing time for processing: {processing_time:.2f} seconds")
+        
 if __name__ == "__main__":
     main()
     
