@@ -1,5 +1,3 @@
-
-
 import csv
 import time
 import os
@@ -255,6 +253,32 @@ def process_message(message, indices: List[int]) -> dict:
     except Exception as e:
         print(f"Error processing message {message['message_number']}: {e}")
         return None
+    
+def bbox_3km_center(lat: np.ndarray, lon: np.ndarray) -> tuple:
+    """
+    lat_c: latitude in degrees (e.g., 37.77327165)
+    lon_c_0_360: longitude in 0–360 convention (e.g., 272.4791282439)
+    Returns: (lat_min, lat_max, lon_min, lon_max) with lon in -180..180
+    """
+    # 1) Convert 0–360 lon to -180..180
+    lon_converted = np.where(lon > 180, lon - 360.0, lon)
+
+    # 2) Compute degree offsets for 1.5 km in each direction
+    half_km = 1.5
+    # Approximate conversions
+    lat_deg_per_km = 1.0 / 111.2
+    lon_deg_per_km = 1.0 / (111.2 * np.cos(np.radians(lat)))
+
+    dlat = half_km * lat_deg_per_km
+    dlon = half_km * lon_deg_per_km
+
+    lat_min = lat - dlat
+    lat_max = lat + dlat
+    lon_min = lon_converted - dlon
+    lon_max = lon_converted + dlon
+
+    return lat_min, lat_max, lon_min, lon_max
+
 
 def process_daily_results(daily_results: List[dict]) -> dict:
     intermediate = {}
@@ -284,7 +308,7 @@ def process_daily_results(daily_results: List[dict]) -> dict:
     return processed_data
 
 
-def save_results(date: str, results: dict, lat:np.ndarray, lon: np.ndarray):
+def save_results(date: str, results: dict, bbox_3km: tuple):
 
     year = date[:4]
     output_dir = f"../output/{year}"
@@ -295,13 +319,13 @@ def save_results(date: str, results: dict, lat:np.ndarray, lon: np.ndarray):
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
         cols = results.keys()
-        writer.writerow(['lat', 'lon', *cols])
+        writer.writerow(['lat_min', 'lat_max', 'lon_min', 'lon_max', *cols])
 
-        for i, l in enumerate(lat):
+        for i, lat_min in enumerate(bbox_3km[0]):
             values =[]
             for col in cols:
                 values.append(results[col][i])
-            writer.writerow([l, lon[i], *values])
+            writer.writerow([lat_min, bbox_3km[1][i], bbox_3km[2][i], bbox_3km[3][i], *values])
 
 def process_lat_lon(path: str):
     if not os.path.exists("../cache/lat_grid.npy") or not os.path.exists("../cache/lon_grid.npy"):
@@ -349,8 +373,11 @@ def process_single_day(paths: List[str], date: str, lat: np.ndarray, lon: np.nda
         processed_results = process_daily_results(results)
         del results
 
+        # processing lat and lon values to get a bounding box of 3km around center
+        bbox_3km = bbox_3km_center(lat, lon)
+
         print("Processed results for date:", date)
-        save_results(date, processed_results, lat, lon)
+        save_results(date, processed_results, bbox_3km)
 
         del processed_results
 
@@ -416,7 +443,7 @@ def main():
     # for date, paths in file_paths_based_on_date.items():
     #     print(f"Date: {date}, Number of files: {len(paths)}")
     #     process_single_day(paths, date, lat, lon, indices)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=24) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=15) as executor:
 
         futures = [
             executor.submit(process_single_day, paths, date, lat, lon, indices)
@@ -428,14 +455,13 @@ def main():
         total = len(futures)
 
         for future in concurrent.futures.as_completed(futures):
-            date = futures[future]
             completed += 1
             
             try:
                 result = future.result()  # This is critical - must call result()
-                print(f"[{completed}/{total}] Completed: {date} - {result.get('status', 'unknown')}")
+                print(f"[{completed}/{total}] Completed:  - {result.get('status', 'unknown')}")
             except Exception as e:
-                print(f"[{completed}/{total}] Failed: {date} - Error: {e}")
+                print(f"[{completed}/{total}] Failed: - Error: {e}")
             
             # Explicitly delete the future reference
             del future
