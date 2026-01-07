@@ -336,6 +336,7 @@ def process_lat_lon(path: str):
         lat = np.load("../cache/lat_grid.npy")
         lon = np.load("../cache/lon_grid.npy")
 
+    # indiana bbox
     bboxs = [(37.772, 41.761, 272.472, 275.216)]
     indices = extract_indices_for_bbox(lat, lon, bboxs)
 
@@ -349,7 +350,8 @@ def process_lat_lon(path: str):
     return filtered_lat, filtered_lon, indices
 
 
-def process_single_day(paths: List[str], date: str, lat: np.ndarray, lon: np.ndarray, indices: List[int]) -> dict:
+def process_single_day(paths: List[str], date: str) -> dict:
+    lat, lon, indices = process_lat_lon(paths[0])
 
     print("Processing date:", date)
     results = []
@@ -436,17 +438,15 @@ def main():
 
     file_paths_based_on_date = load_file_paths(root_data_dir)
 
-    lat, lon, indices = process_lat_lon(file_paths_based_on_date["20221003"][0])
-
     start_time = time.time()
 
     # for date, paths in file_paths_based_on_date.items():
     #     print(f"Date: {date}, Number of files: {len(paths)}")
     #     process_single_day(paths, date, lat, lon, indices)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=15) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
 
         futures = [
-            executor.submit(process_single_day, paths, date, lat, lon, indices)
+            executor.submit(process_single_day, paths, date)
             for date, paths in file_paths_based_on_date.items()
         ]
 
@@ -454,13 +454,14 @@ def main():
         completed = 0
         total = len(futures)
 
-        for future in concurrent.futures.as_completed(futures):
+        for future in concurrent.futures.as_completed(futures, timeout=600):
             completed += 1
             
             try:
-                result = future.result()  # This is critical - must call result()
-                print(f"[{completed}/{total}] Completed:  - {result.get('status', 'unknown')}")
+                result = future.result(timeout=60)  # This is critical - must call result()
+                print(f"[{completed}/{total}] Completed")
             except Exception as e:
+                future.cancel()
                 print(f"[{completed}/{total}] Failed: - Error: {e}")
             
             # Explicitly delete the future reference
