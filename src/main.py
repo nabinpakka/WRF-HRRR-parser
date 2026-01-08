@@ -4,6 +4,7 @@ import os
 import tqdm
 import math
 import json
+import logging
 from typing import List
 
 import numpy as np
@@ -18,7 +19,7 @@ import bitreader_c
 import utils 
     
 
-def parse_single_message(gid: int, message_number: int, lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict:
+def parse_single_message(gid: int, message_number: int) -> dict:
     """
     Parse a single GRIB message.
     """
@@ -69,12 +70,12 @@ def parse_single_message(gid: int, message_number: int, lat_grid: np.ndarray, lo
         "number_of_octets_extra_descriptors": data['numberOfOctetsExtraDescriptors'],
         "missing_value_management": data['missingValueManagementUsed'],
         "section7_length": data['section7Length'],
-        "latitudes": lat_grid,
-        "longitudes": lon_grid,
+        # "latitudes": lat_grid,
+        # "longitudes": lon_grid,
         "raw_data": raw_data
     }
 
-def parse_grib_file(filename: str, lat_grid: np.ndarray, lon_grid: np.ndarray) -> list:
+def parse_grib_file(filename: str) -> list:
     """
     Parse a GRIB file.
     """
@@ -82,34 +83,35 @@ def parse_grib_file(filename: str, lat_grid: np.ndarray, lon_grid: np.ndarray) -
     message_index = 0
     
     with open(filename, 'rb') as f:
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_gid = {}
             
-            msg_count = 0
-            message_idxs = [8, 59, 60, 61, 63, 70, 74, 83, 122]
-            while True:
-                gid = eccodes.codes_grib_new_from_file(f)
-                if gid is None:
-                    break
+        msg_count = 0
+        message_idxs = [8, 59, 60, 61, 63, 70, 74, 83, 122]
+        while True:
+            gid = eccodes.codes_grib_new_from_file(f)
+            if gid is None:
+                break
 
-                # Capture the current message index for this thread
-                current_index = message_index
-                if msg_count >= len(message_idxs):
-                    break
-                if message_idxs[msg_count] == current_index:
-                    # Pass the current index to the thread
-                    future = executor.submit(parse_single_message, gid, current_index, lat_grid, lon_grid)
-                    future_to_gid[future] = gid
-                    msg_count += 1
-                
-
-                message_index += 1  # Increment the message index after submission
+            # Capture the current message index for this thread
+            current_index = message_index
+            if msg_count >= len(message_idxs):
+                break
+            if message_idxs[msg_count] == current_index:
+                # Pass the current index to the thread
+                parse_single_message(gid, current_index)
+                # future = executor.submit(parse_single_message, gid, current_index)
+                # future_to_gid[future] = gid
+                msg_count += 1
             
-            for future in concurrent.futures.as_completed(future_to_gid):
-                try:
-                    messages.append(future.result())
-                except Exception as e:
-                    print(f"Error processing message: {e}")
+
+            message_index += 1 
+        # with concurrent.futures.ThreadPoolExecutor() as executor:
+        #      # Increment the message index after submission
+            
+        #     for future in concurrent.futures.as_completed(future_to_gid):
+        #         try:
+        #             messages.append(future.result())
+        #         except Exception as e:
+        #             print(f"Error processing message: {e}")
 
     # sort messages by message number
     messages.sort(key=lambda x: x["message_number"])
@@ -199,12 +201,23 @@ def process_message(message, indices: List[int]) -> dict:
 
         # get the first values of original scaled data
         try:
+            if message['bitpervalue'] ==0 and message['reference_value'] == 0.0:
+                return {
+                    'name': message["parameter_name"],
+                    'message_number': message['message_number'],
+                    'unscaled_values': np.zeros(message['total_data_points'])
+                }
+
+
             first_values = extract_initial_values(message, bit_reader)
         except Exception as e:
+            print(message)
+            print(f"Process message exception: {e}")
             # put all values as 0
             unscaled_values = np.zeros(message['total_data_points'])
             
             return {
+                'name': "unknown",
                 'message_number': message['message_number'],
                 'unscaled_values': unscaled_values
             }
@@ -326,6 +339,7 @@ def save_results(date: str, results: dict, bbox_3km: tuple):
             for col in cols:
                 values.append(results[col][i])
             writer.writerow([lat_min, bbox_3km[1][i], bbox_3km[2][i], bbox_3km[3][i], *values])
+    del results 
 
 def process_lat_lon(path: str):
     if not os.path.exists("../cache/lat_grid.npy") or not os.path.exists("../cache/lon_grid.npy"):
@@ -353,17 +367,20 @@ def process_lat_lon(path: str):
 def process_single_day(paths: List[str], date: str) -> dict:
     lat, lon, indices = process_lat_lon(paths[0])
 
-    print("Processing date:", date)
+    # print("Processing date:", date)
     results = []
     try:
         start_time = time.time()
         for path in paths:
             # parse the GRIB file
-            print("Parsing file:", path)
-            messages = parse_grib_file(path, lat, lon)
+            # print("Parsing file:", path)
+            messages = parse_grib_file(path)
             print("Parsed file:", path)
-            for mesage in messages:
-                result = process_message(mesage, indices)
+            for message in messages:
+                result = process_message(message, indices)
+                
+                if result["name"] == "unknown":
+                    continue
                 results.append(result)
             print("Processed file:", path)
 
@@ -375,12 +392,13 @@ def process_single_day(paths: List[str], date: str) -> dict:
         processed_results = process_daily_results(results)
         del results
 
-        # processing lat and lon values to get a bounding box of 3km around center
+        #processing lat and lon values to get a bounding box of 3km around center
         bbox_3km = bbox_3km_center(lat, lon)
 
         print("Processed results for date:", date)
         save_results(date, processed_results, bbox_3km)
 
+        del bbox_3km
         del processed_results
 
     except Exception as e:
@@ -404,7 +422,7 @@ def load_file_paths(root_data_dir: str) -> dict:
             if not os.path.isdir(year_path):
                 continue
                 
-            for date_dir in os.listdir(year_path):
+            for date_dir in sorted(os.listdir(year_path)):
                 day_path = os.path.join(year_path, date_dir)
                 if not os.path.isdir(day_path):
                     continue
@@ -416,7 +434,7 @@ def load_file_paths(root_data_dir: str) -> dict:
                 ]
                 
                 if file_paths:
-                    file_paths_based_on_date[date_dir] = file_paths
+                    file_paths_based_on_date[date_dir] = sorted(file_paths)
         
         with open(filepath_dict_path, 'w') as f:
             json.dump(file_paths_based_on_date, f, indent=4)
@@ -425,7 +443,42 @@ def load_file_paths(root_data_dir: str) -> dict:
             file_paths_based_on_date = json.load(f)
     return file_paths_based_on_date
 
-def main():
+def process_messages_parallely(batch: dict):
+    with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
+
+        futures = [
+            executor.submit(process_single_day, paths, date)
+            for date, paths in batch.items()
+        ]
+
+        # processing results as they complete
+        completed = 0
+        total = len(futures)
+
+        for future in concurrent.futures.as_completed(futures):
+            completed += 1
+            date = "Unkown"
+            
+            try:
+                result = future.result()  # This is critical - must call result()
+                date = future.result().get("date", "unknown")
+                print(f"[{completed}/{total}] Completed")
+            except Exception as e:
+                future.cancel()
+                logger.error(f"Error processing day {date}: {e}")
+                print(f"[{completed}/{total}] Failed processing for day {date}: - Error: {e}")
+            
+            # Explicitly delete the future reference
+            del future
+
+def split_dict_ordered(large_dict: dict, batch_size: int = 5):
+    keys = list(large_dict.keys())  # Ordered
+    for start in range(0, len(keys), batch_size):
+        end = min(start + batch_size, len(keys))
+        batch_keys = keys[start:end]
+        yield {k: large_dict[k] for k in batch_keys}
+
+def main(logger):
 
     print("\n\n")
 
@@ -443,33 +496,25 @@ def main():
     # for date, paths in file_paths_based_on_date.items():
     #     print(f"Date: {date}, Number of files: {len(paths)}")
     #     process_single_day(paths, date, lat, lon, indices)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
-
-        futures = [
-            executor.submit(process_single_day, paths, date)
-            for date, paths in file_paths_based_on_date.items()
-        ]
-
-        # processing results as they complete
-        completed = 0
-        total = len(futures)
-
-        for future in concurrent.futures.as_completed(futures, timeout=600):
-            completed += 1
-            
-            try:
-                result = future.result(timeout=60)  # This is critical - must call result()
-                print(f"[{completed}/{total}] Completed")
-            except Exception as e:
-                future.cancel()
-                print(f"[{completed}/{total}] Failed: - Error: {e}")
-            
-            # Explicitly delete the future reference
-            del future
+    batch_size = 30
+    days = len(file_paths_based_on_date)
+    for batch in split_dict_ordered(file_paths_based_on_date, batch_size):
+        process_messages_parallely(batch)
 
     processing_time = time.time() - start_time
     print(f"Processing time for processing: {processing_time:.2f} seconds")
         
 if __name__ == "__main__":
-    main()
+
+    # Set up logging once at the top of your script (or in main)
+    logging.basicConfig(
+        level=logging.ERROR,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('errors.log', mode='a'),  # append to avoid overwriting
+            logging.StreamHandler()  # optional: also print to console
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    main(logger)
     
