@@ -18,7 +18,7 @@ import bitreader_c
 import utils 
     
 
-def parse_single_message(gid: int, message_number: int, lat_grid: np.ndarray, lon_grid: np.ndarray) -> dict:
+def parse_single_message(gid: int, message_number: int) -> dict:
     """
     Parse a single GRIB message.
     """
@@ -69,12 +69,10 @@ def parse_single_message(gid: int, message_number: int, lat_grid: np.ndarray, lo
         "number_of_octets_extra_descriptors": data['numberOfOctetsExtraDescriptors'],
         "missing_value_management": data['missingValueManagementUsed'],
         "section7_length": data['section7Length'],
-        "latitudes": lat_grid,
-        "longitudes": lon_grid,
         "raw_data": raw_data
     }
 
-def parse_grib_file(filename: str, lat_grid: np.ndarray, lon_grid: np.ndarray) -> list:
+def parse_grib_file(filename: str) -> list:
     """
     Parse a GRIB file.
     """
@@ -98,7 +96,7 @@ def parse_grib_file(filename: str, lat_grid: np.ndarray, lon_grid: np.ndarray) -
                     break
                 if message_idxs[msg_count] == current_index:
                     # Pass the current index to the thread
-                    future = executor.submit(parse_single_message, gid, current_index, lat_grid, lon_grid)
+                    future = executor.submit(parse_single_message, gid, current_index)
                     future_to_gid[future] = gid
                     msg_count += 1
                 
@@ -349,8 +347,8 @@ def process_lat_lon(path: str):
     return filtered_lat, filtered_lon, indices
 
 
-def process_single_day(paths: List[str], date: str, lat: np.ndarray, lon: np.ndarray, indices: List[int]) -> dict:
-
+def process_single_day(paths: List[str], date: str) -> dict:
+    lat, lon, indices = process_lat_lon(paths[0])
     print("Processing date:", date)
     results = []
     try:
@@ -358,7 +356,7 @@ def process_single_day(paths: List[str], date: str, lat: np.ndarray, lon: np.nda
         for path in paths:
             # parse the GRIB file
             print("Parsing file:", path)
-            messages = parse_grib_file(path, lat, lon)
+            messages = parse_grib_file(path)
             print("Parsed file:", path)
             for mesage in messages:
                 result = process_message(mesage, indices)
@@ -423,6 +421,15 @@ def load_file_paths(root_data_dir: str) -> dict:
             file_paths_based_on_date = json.load(f)
     return file_paths_based_on_date
 
+
+def split_dict_into_batch(large_dict: dict, batch_size=10):   
+    keys = list(large_dict.keys())  # Ordered
+    for start in range(0, len(keys), batch_size):
+        end = min(start + batch_size, len(keys))
+        batch_keys = keys[start:end]
+        yield {k: large_dict[k] for k in batch_keys}
+
+
 def main():
 
     print("\n\n")
@@ -436,35 +443,37 @@ def main():
 
     file_paths_based_on_date = load_file_paths(root_data_dir)
 
-    lat, lon, indices = process_lat_lon(file_paths_based_on_date["20221003"][0])
-
     start_time = time.time()
 
     # for date, paths in file_paths_based_on_date.items():
     #     print(f"Date: {date}, Number of files: {len(paths)}")
     #     process_single_day(paths, date, lat, lon, indices)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=15) as executor:
+    batch_size = 10
+    for batch in split_dict_into_batch(file_paths_based_on_date, batch_size):
+        with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
+            batch_start_time = time.time()
+            futures = [
+                executor.submit(process_single_day, paths, date)
+                for date, paths in batch.items()
+            ]
 
-        futures = [
-            executor.submit(process_single_day, paths, date, lat, lon, indices)
-            for date, paths in file_paths_based_on_date.items()
-        ]
+            # processing results as they complete
+            completed = 0
+            total = len(futures)
 
-        # processing results as they complete
-        completed = 0
-        total = len(futures)
-
-        for future in concurrent.futures.as_completed(futures):
-            completed += 1
-            
-            try:
-                result = future.result()  # This is critical - must call result()
-                print(f"[{completed}/{total}] Completed:  - {result.get('status', 'unknown')}")
-            except Exception as e:
-                print(f"[{completed}/{total}] Failed: - Error: {e}")
-            
-            # Explicitly delete the future reference
-            del future
+            for future in concurrent.futures.as_completed(futures):
+                completed += 1
+                
+                try:
+                    future.result()  # This is critical - must call result()
+                    print(f"[{completed}/{total}] Completed: ")
+                except Exception as e:
+                    print(f"[{completed}/{total}] Failed: - Error: {e}")
+                
+                # Explicitly delete the future reference
+                del future
+        batch_processing_time = time.time() - batch_start_time
+        print(f"Processing time for processing: {batch_processing_time:.2f} seconds")
 
     processing_time = time.time() - start_time
     print(f"Processing time for processing: {processing_time:.2f} seconds")
