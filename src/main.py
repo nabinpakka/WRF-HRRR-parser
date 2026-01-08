@@ -1,3 +1,4 @@
+import argparse
 import csv
 import time
 import os
@@ -325,7 +326,7 @@ def save_results(date: str, results: dict, bbox_3km: tuple):
                 values.append(results[col][i])
             writer.writerow([lat_min, bbox_3km[1][i], bbox_3km[2][i], bbox_3km[3][i], *values])
 
-def process_lat_lon(path: str):
+def process_lat_lon(path: str, bboxes: List[List]):
     if not os.path.exists("../cache/lat_grid.npy") or not os.path.exists("../cache/lon_grid.npy"):
         lat, lon = load_lat_lon_grid(path)
         np.save("../cache/lat_grid.npy", lat)
@@ -334,8 +335,7 @@ def process_lat_lon(path: str):
         lat = np.load("../cache/lat_grid.npy")
         lon = np.load("../cache/lon_grid.npy")
 
-    bboxs = [(37.772, 41.761, 272.472, 275.216)]
-    indices = extract_indices_for_bbox(lat, lon, bboxs)
+    indices = extract_indices_for_bbox(lat, lon, bboxes)
 
     # record length of indices for each bbox
     indices_lengths = [len(idx) for idx in indices]
@@ -347,8 +347,8 @@ def process_lat_lon(path: str):
     return filtered_lat, filtered_lon, indices
 
 
-def process_single_day(paths: List[str], date: str) -> dict:
-    lat, lon, indices = process_lat_lon(paths[0])
+def process_single_day(paths: List[str], date: str, bboxes: List[List]) -> dict:
+    lat, lon, indices = process_lat_lon(paths[0], bboxes)
     print("Processing date:", date)
     results = []
     try:
@@ -430,11 +430,14 @@ def split_dict_into_batch(large_dict: dict, batch_size=10):
         yield {k: large_dict[k] for k in batch_keys}
 
 
-def main():
+def main(config):
 
     print("\n\n")
 
-    root_data_dir = "/mnt/yieldPrediction/wrf"
+    root_data_dir = config.get("data_root", "../data")
+    batch_size = int(config.get("batch_size", 10))
+    max_workers = int(config.get("max_workers", 10))
+    bboxes = config.get("bboxes", [])
 
     if not os.path.exists("../cache"):
         print("Creating cache directory...")
@@ -448,12 +451,12 @@ def main():
     # for date, paths in file_paths_based_on_date.items():
     #     print(f"Date: {date}, Number of files: {len(paths)}")
     #     process_single_day(paths, date, lat, lon, indices)
-    batch_size = 10
+    
     for batch in split_dict_into_batch(file_paths_based_on_date, batch_size):
-        with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             batch_start_time = time.time()
             futures = [
-                executor.submit(process_single_day, paths, date)
+                executor.submit(process_single_day, paths, date,bboxes)
                 for date, paths in batch.items()
             ]
 
@@ -477,7 +480,18 @@ def main():
 
     processing_time = time.time() - start_time
     print(f"Processing time for processing: {processing_time:.2f} seconds")
+
+def parse_json(path: str)  -> dict:
+    with open(path, 'r') as f:
+        config = json.load(f)
+    return config
         
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Process WRF-HRRR GRIB2 files.")
+    parser.add_argument('--config','-c', type=str, default='../config.json',
+                        help='Root directory containing WRF-HRRR GRIB2 files organized by year/date.')
+    args = parser.parse_args()
+    config = parse_json(args.config)
+    
+    main(config)
     
