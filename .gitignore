@@ -2,3 +2,4 @@ grib_data
 cache
 misc
 output
+src/errors.log

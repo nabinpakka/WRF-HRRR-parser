@@ -1,0 +1,8 @@
+{
+    "data_root": "/mnt/yieldPrediction/wrf",
+    "bboxes": [[37.772, 41.761, 272.472, 275.216]],
+    "max_workers": 10,
+    "output_dir": "../output",
+    "message_numbers": [8, 59, 60, 61, 63, 70, 74, 83, 122],
+    "batch_size": 10
+}

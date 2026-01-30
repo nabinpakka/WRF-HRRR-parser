@@ -15,7 +15,7 @@ Parsing the byte data currently takes the most time and to be improved. Current 
 First, clone the project repository to your local machine:
 
 ```bash
-git clone https://github.com/brycetur21/grib_parser.git
+git clone https://github.com/nabinpakka/WRF-HRRR-parser.git
 cd grib_parser/
 ```
 
