@@ -1,5 +1,6 @@
 import argparse
 import csv
+from email.mime import message
 import time
 import os
 import tqdm
@@ -166,21 +167,17 @@ def load_lat_lon_grid(filename: str) -> tuple:
     return lats, lons
 
 
-def extract_indices_for_bbox(lat: np.ndarray, lon: np.ndarray, bboxs: List[tuple]) -> List[List[float]]:
-    all_indices =[]
+def extract_indices_for_bbox(lat: np.ndarray, lon: np.ndarray, bbox: List):
 
-    for bbox in bboxs:
-        """Extract data for a given bounding box."""
-        lat_min, lat_max, lon_min, lon_max = bbox
-        # Combined mask: points where BOTH lat AND lon are inside bbox
-        mask = ((lat >= lat_min) & (lat <= lat_max) &
-                (lon >= lon_min) & (lon <= lon_max))
+    """Extract data for a given bounding box."""
+    lat_min, lat_max, lon_min, lon_max = bbox
+    # Combined mask: points where BOTH lat AND lon are inside bbox
+    mask = ((lat >= lat_min) & (lat <= lat_max) &
+            (lon >= lon_min) & (lon <= lon_max))
 
-        # Get indices of points inside Indiana
-        latlon_indices = np.where(mask)[0]
-        all_indices.append(latlon_indices)
-
-    return all_indices
+    # Get indices of points inside Indiana
+    latlon_indices = np.where(mask)[0]
+    return latlon_indices
 
 def get_lat_lon_for_indices(lat: np.ndarray, lon: np.ndarray, indices: List[int]) -> tuple:
     """Get latitudes and longitudes for given indices."""
@@ -192,6 +189,7 @@ def get_lat_lon_for_indices(lat: np.ndarray, lon: np.ndarray, indices: List[int]
 def process_message(message, indices: List[int]) -> dict:
     """Function to process a single message."""
     try:
+        print(f"Processing message number: {message['message_number']} with parameter: {message['parameter_name']}")
         # create a BitReader object
         bit_reader = bitreader_c.BitReader(message['raw_data'], initial_bit_offset=40)
 
@@ -233,8 +231,8 @@ def process_message(message, indices: List[int]) -> dict:
         del bit_reader
 
         # undo spatial differencing
-
         original_scaled_values = utils.undo_second_order_differencing(packed_values, first_values)
+        indices = indices.astype(int)
         filtered_original_scaled_values = original_scaled_values[indices]
         del original_scaled_values
         del packed_values
@@ -248,6 +246,7 @@ def process_message(message, indices: List[int]) -> dict:
             'message_number': message['message_number'],
             'unscaled_values': unscaled_values
         }
+    
 
     except Exception as e:
         print(f"Error processing message {message['message_number']}: {e}")
@@ -307,26 +306,26 @@ def process_daily_results(daily_results: List[dict]) -> dict:
     return processed_data
 
 
-def save_results(date: str, results: dict, bbox_3km: tuple):
+def save_results(date: str, results: dict, bbox_3km: tuple, state_indices_tracker: dict):
 
     year = date[:4]
-    output_dir = f"../output/{year}"
+    for state, indices in state_indices_tracker.items():
+        output_dir = f"../output/{year}/{state}"
+        os.makedirs(output_dir, exist_ok=True)
+        # Save results to a file
+        filename = f"{output_dir}/{date}.csv"
+        with open(filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            cols = results.keys()
+            writer.writerow(['lat_min', 'lat_max', 'lon_min', 'lon_max', *cols])
 
-    os.makedirs(output_dir, exist_ok=True)
-    # Save results to a file
-    filename = f"{output_dir}/{date}.csv"
-    with open(filename, 'w', newline='') as f:
-        writer = csv.writer(f)
-        cols = results.keys()
-        writer.writerow(['lat_min', 'lat_max', 'lon_min', 'lon_max', *cols])
+            for i in range(indices[0], indices[1]):
+                values =[]
+                for col in cols:
+                    values.append(results[col][i])
+                writer.writerow([bbox_3km[0][i], bbox_3km[1][i], bbox_3km[2][i], bbox_3km[3][i], *values])
 
-        for i, lat_min in enumerate(bbox_3km[0]):
-            values =[]
-            for col in cols:
-                values.append(results[col][i])
-            writer.writerow([lat_min, bbox_3km[1][i], bbox_3km[2][i], bbox_3km[3][i], *values])
-
-def process_lat_lon(path: str, bboxes: List[List]):
+def process_lat_lon(path: str, bboxes: List):
     if not os.path.exists("../cache/lat_grid.npy") or not os.path.exists("../cache/lon_grid.npy"):
         lat, lon = load_lat_lon_grid(path)
         np.save("../cache/lat_grid.npy", lat)
@@ -337,18 +336,24 @@ def process_lat_lon(path: str, bboxes: List[List]):
 
     indices = extract_indices_for_bbox(lat, lon, bboxes)
 
-    # record length of indices for each bbox
-    indices_lengths = [len(idx) for idx in indices]
-    print(indices_lengths)
-
-    indices = [idx for sublist in indices for idx in sublist]
+    # # record length of indices for each bbox
+    # indices_lengths = [len(idx) for idx in indices]
+    # print(indices_lengths)
 
     filtered_lat, filtered_lon = get_lat_lon_for_indices(lat, lon, indices)
     return filtered_lat, filtered_lon, indices
 
 
-def process_single_day(paths: List[str], date: str, bboxes: List[List]) -> dict:
-    lat, lon, indices = process_lat_lon(paths[0], bboxes)
+def process_single_day(paths: List[str], date: str, bboxes: dict) -> dict:
+    print(f"Processing date: {date} with {len(paths)} files.")
+    state_indices_tracker = {}
+    lats, lons, indices = np.array([]), np.array([]), np.array([])
+    index_tracker = 0
+    for key, value in bboxes.items():
+        state_lat, state_lon, state_indices = process_lat_lon(paths[0], list(value))
+        state_indices_tracker[key] = (index_tracker, len(state_indices))
+        index_tracker += len(state_indices)
+        lats, lons, indices = np.concatenate((lats, state_lat)), np.concatenate((lons, state_lon)), np.concatenate((indices, state_indices))
     print("Processing date:", date)
     results = []
     try:
@@ -372,10 +377,10 @@ def process_single_day(paths: List[str], date: str, bboxes: List[List]) -> dict:
         del results
 
         # processing lat and lon values to get a bounding box of 3km around center
-        bbox_3km = bbox_3km_center(lat, lon)
+        bbox_3km = bbox_3km_center(lats, lons)
 
         print("Processed results for date:", date)
-        save_results(date, processed_results, bbox_3km)
+        save_results(date, processed_results, bbox_3km, state_indices_tracker )
 
         del processed_results
 
@@ -437,7 +442,7 @@ def main(config):
     root_data_dir = config.get("data_root", "../data")
     batch_size = int(config.get("batch_size", 10))
     max_workers = int(config.get("max_workers", 10))
-    bboxes = config.get("bboxes", [])
+    bboxes = config.get("bboxes", {})
 
     if not os.path.exists("../cache"):
         print("Creating cache directory...")
@@ -466,14 +471,14 @@ def main(config):
 
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
-                
+                # future.result()
                 try:
                     future.result()  # This is critical - must call result()
                     print(f"[{completed}/{total}] Completed: ")
                 except Exception as e:
                     print(f"[{completed}/{total}] Failed: - Error: {e}")
                 
-                # Explicitly delete the future reference
+                #Explicitly delete the future reference
                 del future
         batch_processing_time = time.time() - batch_start_time
         print(f"Processing time for processing: {batch_processing_time:.2f} seconds")
